@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart City Grid</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--paper:#eef0ea;--panel:#fbfbf8;--ink:#17262b;--muted:#5d6c70;--line:#d5d9cf;
+--ok:#2f9e5b;--warn:#e0a100;--crit:#d64032;--off:#8d969a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:"Segoe UI",system-ui,sans-serif;line-height:1.45}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 20px;padding:16px 24px;border-bottom:1px solid var(--line)}
+h1{font-size:22px;margin:0;font-weight:700;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:14px}
+.mode{margin-left:auto;padding:6px 14px;border-radius:999px;font-weight:600;font-size:14px;background:var(--ok);color:#fff}
+.mode.emergency{background:var(--crit)}
+.live{font-size:13px;color:var(--muted)}
+main{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:16px;padding:16px 24px 28px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+h2{font-size:16px;margin:0 0 10px}
+#map{width:100%;height:auto;display:block;background:#e6eae0;border-radius:8px}
+.zone{cursor:pointer}
+.zone rect.d{stroke:var(--ink);stroke-width:2;transition:fill .3s}
+.zone.sel rect.d{stroke-width:5}
+.zone text{pointer-events:none;fill:#fff;font-weight:700}
+.zone.critical .halo{animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.05}}
+@media(prefers-reduced-motion:reduce){.zone.critical .halo{animation:none}}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--muted);margin-top:10px}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:14px}
+.zc{border:1px solid var(--line);border-radius:8px;padding:10px 12px;cursor:pointer;background:#fff}
+.zc.sel{border-color:var(--ink)}
+.zc b{display:flex;justify-content:space-between;font-size:15px}
+.zc small{color:var(--muted);display:block;font-size:12px}
+.pill{font-size:12px;padding:1px 8px;border-radius:999px;color:#fff}
+.score{font-size:64px;font-weight:700;line-height:1;letter-spacing:-.03em}
+.bar{height:10px;background:var(--line);border-radius:6px;overflow:hidden;margin:12px 0 6px}
+.bar div{height:100%;width:0;background:var(--ok);transition:width .4s,background .4s}
+#feed{list-style:none;margin:0;padding:0;max-height:330px;overflow:auto}
+#feed li{padding:9px 0;border-top:1px solid var(--line);font-size:14px}
+#feed li:first-child{border-top:0}
+#feed time{color:var(--muted);font-size:12px;display:block}
+.tabs{display:flex;gap:8px;margin-bottom:10px}
+.tabs button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 16px;font:inherit;cursor:pointer}
+.tabs button.sel{background:var(--ink);color:#fff;border-color:var(--ink)}
+.tabs button:focus-visible,.zc:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
+.chartbox{position:relative;height:280px}
+.wide{grid-column:1/-1}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Smart City Grid</h1><div class="sub">Multi-zone early warning for fire, gas leaks and floods</div></div>
+  <span class="live" id="live">Connecting…</span>
+  <span class="mode" id="mode">City normal</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>City map</h2>
+    <svg id="map" viewBox="0 0 720 300" role="img" aria-label="Zone map"></svg>
+    <div class="legend">
+      <span><i style="background:var(--ok)"></i>Normal</span>
+      <span><i style="background:var(--warn)"></i>Warning (neighbour in danger)</span>
+      <span><i style="background:var(--crit)"></i>Critical</span>
+      <span><i style="background:var(--off)"></i>Offline</span>
+    </div>
+    <div class="cards" id="cards"></div>
+  </section>
+  <aside>
+    <section class="panel">
+      <h2>City risk score</h2>
+      <div class="score" id="score">0</div>
+      <div class="bar"><div id="bar"></div></div>
+      <div class="sub" id="critlist">No critical zones</div>
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <h2>Live incident feed</h2>
+      <ul id="feed"><li>Waiting for events…</li></ul>
+    </section>
+  </aside>
+  <section class="panel wide">
+    <h2>Sensor history</h2>
+    <div class="tabs" id="tabs"></div>
+    <div class="chartbox"><canvas id="chart"></canvas></div>
+  </section>
+</main>
+<script>
+const DB_URL = 'https://smart-city-grid-default-rtdb.asia-southeast1.firebasedatabase.app';
+const ZONES = ['A','B','C','D'];
+const COL = {normal:'#2f9e5b',warning:'#e0a100',critical:'#d64032',offline:'#8d969a'};
+const LABEL = {normal:'Normal',warning:'Warning',critical:'Critical',offline:'Offline'};
+const POS = {A:[30,120],B:[200,40],C:[370,120],D:[540,40]};
+let selected = 'D', chart, lastStates = {};
+
+const $ = id => document.getElementById(id);
+const get = async p => (await fetch(DB_URL + '/' + p)).json();
+const Q = '?orderBy=%22%24key%22&limitToLast=';
+
+function drawMap(st){
+  let s = '<g stroke="#cfd5c8" stroke-width="14" stroke-linecap="round">';
+  for(let i=0;i<3;i++){
+    const a=POS[ZONES[i]], b=POS[ZONES[i+1]];
+    s += `<line x1="${a[0]+75}" y1="${a[1]+60}" x2="${b[0]+75}" y2="${b[1]+60}"/>`;
+  }
+  s += '</g>';
+  ZONES.forEach(z=>{
+    const [x,y]=POS[z], c=COL[st[z]];
+    s += `<g class="zone ${st[z]} ${z===selected?'sel':''}" onclick="pick('${z}')">
+      <rect class="halo" x="${x-8}" y="${y-8}" width="166" height="136" rx="22" fill="${c}" opacity=".25"/>
+      <rect class="d" x="${x}" y="${y}" width="150" height="120" rx="16" fill="${c}"/>
+      <text x="${x+75}" y="${y+58}" text-anchor="middle" font-size="40">${z}</text>
+      <text x="${x+75}" y="${y+84}" text-anchor="middle" font-size="14" font-weight="600">${LABEL[st[z]]}</text>
+      <text x="${x+75}" y="${y+104}" text-anchor="middle" font-size="11" font-weight="400">${z==='D'?'Real hardware':'Simulated'}</text>
+    </g>`;
+  });
+  $('map').innerHTML = s;
+}
+
+function drawCards(st, zones){
+  $('cards').innerHTML = ZONES.map(z=>{
+    const d = zones && zones[z];
+    const live = st[z] !== 'offline' && d;
+    return `<div class="zc ${z===selected?'sel':''}" tabindex="0" onclick="pick('${z}')" onkeydown="if(event.key==='Enter')pick('${z}')">
+      <b>Zone ${z}<span class="pill" style="background:${COL[st[z]]}">${LABEL[st[z]]}</span></b>
+      <small>${live?`Gas ${d.gas} · Water ${d.water} cm`:'No recent data'}</small>
+      <small>${live?`Fire ${d.fire?'detected':'clear'}`:''}</small></div>`;
+  }).join('');
+}
+
+function drawFeed(inc){
+  const rows = Object.values(inc||{}).sort((a,b)=>b.ts-a.ts);
+  if(!rows.length){ $('feed').innerHTML='<li>No incidents yet</li>'; return; }
+  $('feed').innerHTML = rows.map(r=>{
+    const icon = r.state==='critical'?'🔴':r.state==='warning'?'🟡':r.state==='emergency'?'🆘':'🟢';
+    const who = r.zone==='CITY' ? 'City-wide emergency' : `Zone ${r.zone} is ${r.state}`;
+    const why = (r.hazards&&r.hazards.length) ? r.hazards.join(', ') : (r.reason||'');
+    return `<li>${icon} <b>${who}</b>${why?` · ${why}`:''}<time>${new Date(r.ts).toLocaleTimeString()}</time></li>`;
+  }).join('');
+}
+
+function initChart(){
+  const tick = {color:'#5d6c70'};
+  chart = new Chart($('chart'),{type:'line',
+    data:{labels:[],datasets:[
+      {label:'Gas (ADC value)',data:[],borderColor:'#c2410c',backgroundColor:'#c2410c',yAxisID:'y',tension:.3,pointRadius:0},
+      {label:'Water distance (cm)',data:[],borderColor:'#0369a1',backgroundColor:'#0369a1',yAxisID:'y1',tension:.3,pointRadius:0}]},
+    options:{animation:false,responsive:true,maintainAspectRatio:false,
+      scales:{x:{ticks:tick},y:{position:'left',ticks:tick,title:{display:true,text:'Gas'}},
+        y1:{position:'right',ticks:tick,grid:{drawOnChartArea:false},title:{display:true,text:'cm'}}}}});
+}
+
+async function drawChart(){
+  const h = await get(`history/${selected}.json${Q}40`);
+  const rows = Object.values(h||{}).sort((a,b)=>a.ts-b.ts);
+  chart.data.labels = rows.map(r=>new Date(r.ts).toLocaleTimeString());
+  chart.data.datasets[0].data = rows.map(r=>r.gas);
+  chart.data.datasets[1].data = rows.map(r=>r.water);
+  chart.update();
+}
+
+function drawTabs(){
+  $('tabs').innerHTML = ZONES.map(z=>`<button class="${z===selected?'sel':''}" onclick="pick('${z}')">Zone ${z}</button>`).join('');
+}
+
+function pick(z){ selected = z; drawTabs(); drawMap(lastStates); refreshCharts(); tick(); }
+const refreshCharts = () => drawChart().catch(()=>{});
+
+async function tick(){
+  try{
+    const [zones,status,city,inc] = await Promise.all([
+      get('zones.json'), get('status.json'), get('city.json'), get(`incidents.json${Q}12`)]);
+    const st = {};
+    ZONES.forEach(z=>{
+      const d = zones && zones[z];
+      st[z] = (!d || Date.now()-d.ts > 45000) ? 'offline' : ((status&&status[z]&&status[z].status) || (d.state==='critical'?'critical':'normal'));
+      if(st[z]==='offline' && d && Date.now()-d.ts <= 45000) st[z]='normal';
+    });
+    lastStates = st;
+    drawMap(st); drawCards(st, zones); drawFeed(inc);
+    const risk = (city&&city.risk_score)||0, em = city&&city.mode==='emergency';
+    $('score').textContent = risk;
+    $('bar').style.width = risk+'%';
+    $('bar').style.background = risk>=60?COL.critical:risk>=30?COL.warning:COL.normal;
+    $('critlist').textContent = (city&&city.critical_zones&&city.critical_zones.length)?'Critical: Zone '+city.critical_zones.join(', Zone '):'No critical zones';
+    $('mode').textContent = em?'City-wide emergency':'City normal';
+    $('mode').className = 'mode'+(em?' emergency':'');
+    $('live').textContent = 'Live · updated '+new Date().toLocaleTimeString();
+  }catch(e){ $('live').textContent = 'Connection lost, retrying…'; }
+}
+
+initChart(); drawTabs(); tick(); refreshCharts();
+setInterval(tick, 2000);
+setInterval(refreshCharts, 5000);
+</script>
+</body>
+</html>
